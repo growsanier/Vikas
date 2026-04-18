@@ -1,0 +1,32 @@
+{
+  "entities": {
+    "Character": {
+      "title": "Character",
+      "description": "A character in the cast with their costume and props checklist.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "serial": { "type": "string" },
+        "name": { "type": "string" },
+        "costume": { "type": "string" },
+        "props": { "type": "string" },
+        "isChecked": { "type": "boolean" },
+        "checkedCostumes": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "checkedProps": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "required": ["id", "serial", "name", "costume", "props", "isChecked"]
+    }
+  },
+  "firestore": {
+    "characters/{characterId}": {
+      "schema": { "$ref": "Character" },
+      "description": "Collection of all characters and their checklist states."
+    }
+  }
+}

@@ -1,5 +1,12 @@
-import React, { useState, useEffect } from 'react';
-import { Edit2, Save, X, CheckSquare, Square, CheckCircle2, Circle } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Edit2, Save, X, CheckSquare, Square, CheckCircle2, Circle, Download, FileText } from 'lucide-react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, doc, onSnapshot, setDoc, getDocFromServer } from 'firebase/firestore';
+import firebaseConfig from '../firebase-applet-config.json';
+import html2canvas from 'html2canvas';
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
 interface Character {
   id: string;
@@ -30,33 +37,98 @@ const INITIAL_DATA: Character[] = [
   { id: '15', serial: '15', name: 'ग्रामीण स्त्री (कोरस)', costume: 'देहाती तरीके से पहनी गई साड़ी, बिंदी, चूड़ियाँ', props: 'टोकरी या बर्तन (दृश्य के अनुसार)', isChecked: false },
 ];
 
-export default function App() {
-  const [characters, setCharacters] = useState<Character[]>(() => {
-    const saved = localStorage.getItem('character_tracker_db');
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Local storage data corrupt", e);
-      }
+// Check Firebase connection
+async function testConnection() {
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if(error instanceof Error && error.message.includes('the client is offline')) {
+      console.error("Please check your Firebase configuration.");
     }
-    return INITIAL_DATA;
-  });
+  }
+}
+testConnection();
 
+export default function App() {
+  const [characters, setCharacters] = useState<Character[]>(INITIAL_DATA);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editFormData, setEditFormData] = useState<Character | null>(null);
+  const [showReportModal, setShowReportModal] = useState(false);
+  const reportRef = useRef<HTMLDivElement>(null);
 
-  // Save to "Database" (LocalStorage) whenever characters change
+  // Listen to Firestore
   useEffect(() => {
-    localStorage.setItem('character_tracker_db', JSON.stringify(characters));
-  }, [characters]);
+    
+    // We only have 15 global characters, let's sync them efficiently to avoid heavy individual document updates if not needed.
+    // However, the rule we wrote was for individual character documents `characters/{characterId}`.
+    // Let's sync them individually.
+    const unsubs: (() => void)[] = [];
+    
+    // Fallback: populate from local but fetch online to override.
+    // Instead of complex individual sync right now, we can just fetch all 15.
+    (async () => {
+       INITIAL_DATA.forEach((initChar, index) => {
+          const charRef = doc(db, 'characters', initChar.id);
+          const unsub = onSnapshot(charRef, (snapshot) => {
+             if (snapshot.exists()) {
+                const data = snapshot.data() as Character;
+                setCharacters(prev => {
+                   const newArr = [...prev];
+                   const i = newArr.findIndex(c => c.id === data.id);
+                   if (i >= 0) newArr[i] = data;
+                   return newArr;
+                });
+             } else {
+                // Document doesn't exist yet, we will create it if we need to sync, but for now just use local.
+             }
+          }, (err) => {
+            console.error("Snapshot error:", err);
+          });
+          unsubs.push(unsub);
+       });
+    })();
+    
+    return () => {
+      unsubs.forEach(fn => fn());
+    };
+  }, []);
+
+  // Update Firestore 
+  const updateCharacterInDB = async (char: Character) => {
+    try {
+      await setDoc(doc(db, 'characters', char.id), char);
+    } catch (e) {
+      console.error("Error saving character", e);
+    }
+  };
+
+  const syncToCloud = async () => {
+    if (!user) {
+      alert("Please sign in first.");
+      return;
+    }
+    setIsSyncing(true);
+    try {
+      await Promise.all(characters.map(char => setDoc(doc(db, 'characters', char.id), char)));
+      setTimeout(() => {
+        alert("डेटा गूगल शीट/फायरबेस डेटाबेस पर भेज दिया गया है! (Database Synced!)");
+        setIsSyncing(false);
+      }, 500);
+    } catch (e) {
+      console.error("Cloud Sync Error:", e);
+      alert("क्लाउड सिंक करने में त्रुटि आई। (Error syncing to cloud)");
+      setIsSyncing(false);
+    }
+  };
 
   const toggleCostume = (id: string, item: string) => {
     setCharacters(chars => chars.map(c => {
       if (c.id !== id) return c;
       const list = c.checkedCostumes || [];
       const isChecked = list.includes(item);
-      return { ...c, checkedCostumes: isChecked ? list.filter(i => i !== item) : [...list, item] };
+      const updated = { ...c, checkedCostumes: isChecked ? list.filter(i => i !== item) : [...list, item] };
+      updateCharacterInDB(updated);
+      return updated;
     }));
   };
 
@@ -65,7 +137,9 @@ export default function App() {
       if (c.id !== id) return c;
       const list = c.checkedProps || [];
       const isChecked = list.includes(item);
-      return { ...c, checkedProps: isChecked ? list.filter(i => i !== item) : [...list, item] };
+      const updated = { ...c, checkedProps: isChecked ? list.filter(i => i !== item) : [...list, item] };
+      updateCharacterInDB(updated);
+      return updated;
     }));
   };
 
@@ -109,7 +183,14 @@ export default function App() {
 
   const toggleCheck = (id: string) => {
     setCharacters(chars => 
-      chars.map(c => c.id === id ? { ...c, isChecked: !c.isChecked } : c)
+      chars.map(c => {
+        if (c.id === id) {
+          const updated = { ...c, isChecked: !c.isChecked };
+          updateCharacterInDB(updated);
+          return updated;
+        }
+        return c;
+      })
     );
   };
 
@@ -126,7 +207,13 @@ export default function App() {
   const saveEdit = () => {
     if (editFormData) {
       setCharacters(chars => 
-        chars.map(c => c.id === editFormData.id ? editFormData : c)
+        chars.map(c => {
+          if (c.id === editFormData.id) {
+            updateCharacterInDB(editFormData);
+            return editFormData;
+          }
+          return c;
+        })
       );
       setEditingId(null);
       setEditFormData(null);
@@ -142,6 +229,23 @@ export default function App() {
   const resetData = () => {
     if (confirm('क्या आप सभी डेटा को रीसेट करना चाहते हैं? (Are you sure you want to reset to default?)')) {
       setCharacters(INITIAL_DATA);
+      INITIAL_DATA.forEach(char => updateCharacterInDB(char));
+    }
+  };
+
+  const handleDownloadPNG = async () => {
+    if (!reportRef.current) return;
+    try {
+      // Small timeout to ensure font rendering if any
+      const canvas = await html2canvas(reportRef.current, { scale: 2, useCORS: true, backgroundColor: '#ffffff' });
+      const image = canvas.toDataURL("image/png", 1.0);
+      const link = document.createElement("a");
+      link.download = "character-report.png";
+      link.href = image;
+      link.click();
+    } catch (err) {
+      console.error("Failed to generate image", err);
+      alert("Image generation failed. Please try again.");
     }
   };
 
@@ -174,15 +278,22 @@ export default function App() {
               </p>
             </div>
             
-            <div className="flex gap-3">
+            <div className="flex gap-3 items-center">
+               <button 
+                onClick={() => setShowReportModal(true)}
+                className="px-4 py-2 text-sm font-medium text-white bg-[rgba(112,224,255,0.15)] hover:bg-[rgba(112,224,255,0.25)] rounded-xl transition-all border border-[rgba(112,224,255,0.3)] shadow-[0_0_15px_rgba(112,224,255,0.1)] flex items-center justify-center gap-2"
+               >
+                 <FileText className="w-4 h-4" />
+                 <span className="hidden sm:inline">रिपोर्ट (Report)</span>
+               </button>
                <button 
                 onClick={resetData}
-                className="px-4 py-2 text-sm font-medium text-red-300 bg-[rgba(255,255,255,0.05)] hover:bg-[rgba(255,255,255,0.1)] rounded-xl transition-colors border border-[rgba(255,255,255,0.1)]"
+                className="px-4 py-2 text-sm font-medium text-red-300 bg-[rgba(255,255,255,0.05)] hover:bg-[rgba(255,255,255,0.1)] rounded-xl transition-colors border border-[rgba(255,255,255,0.1)] hidden md:block"
                >
-                 Reset
+                 Reset All
                </button>
-               <div className="text-sm px-4 py-2 bg-[rgba(112,224,255,0.1)] text-[#70E0FF] rounded-xl font-medium border border-[rgba(112,224,255,0.2)]">
-                 {characters.filter(c => c.isChecked).length} / {characters.length} Complete
+               <div className="text-sm px-4 py-2 bg-[rgba(112,224,255,0.1)] text-[#70E0FF] rounded-xl font-medium border border-[rgba(112,224,255,0.2)] hidden sm:block">
+                 {characters.filter(c => c.isChecked).length} / {characters.length} डन
                </div>
             </div>
           </div>
@@ -409,6 +520,112 @@ export default function App() {
           </div>
         </div>
       </div>
+
+      {/* Report Modal */}
+      {showReportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 sm:p-8">
+          <div className="bg-[#1e293b] rounded-2xl flex flex-col max-h-full w-full max-w-4xl border border-[rgba(255,255,255,0.2)] shadow-2xl relative overflow-hidden">
+             
+             {/* Header */}
+             <div className="p-4 sm:p-6 border-b border-[rgba(255,255,255,0.1)] flex justify-between items-center bg-[#0F172A] shrink-0 sticky top-0 z-10">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-[#70E0FF]">पात्र रिपोर्ट (Report Download)</h2>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button onClick={handleDownloadPNG} className="px-4 py-2 bg-gradient-to-r from-blue-500 to-[#70E0FF] text-blue-950 font-bold rounded-lg flex items-center gap-2 hover:opacity-90 transition-opacity">
+                    <Download className="w-4 h-4" /> <span className="hidden sm:inline">Save Image</span>
+                  </button>
+                  <button onClick={() => setShowReportModal(false)} className="p-2 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-lg transition-colors">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+             </div>
+
+             {/* Scrollable Body containing the Report Preview */}
+             <div className="p-4 sm:p-8 overflow-auto bg-gray-100 flex-1 relative flex justify-center">
+                
+                {/* Captured Container */}
+                <div ref={reportRef} className="bg-[#ffffff] p-8 sm:p-12 text-[#1e293b] w-full max-w-[800px] shadow-lg print:shadow-none" style={{ minHeight: '100%', fontFamily: 'sans-serif' }}>
+                    <div className="text-center mb-10 pb-6 border-b-2 border-[#e2e8f0]">
+                      <h1 className="text-3xl font-extrabold text-[#0f172a] mb-2">प्रोडक्शन: पात्र एवं वेशभूषा रिपोर्ट</h1>
+                      <p className="text-[#64748b] font-medium">अंतिम स्थिति (Status Report) - {new Date().toLocaleDateString('en-IN')}</p>
+                    </div>
+
+                    <div className="space-y-8">
+                      {characters.map(char => {
+                         const costumes = char.costume.split(',').map(s=>s.trim()).filter(s=>s&&s!=='-');
+                         const props = char.props.split(',').map(s=>s.trim()).filter(s=>s&&s!=='-');
+                         
+                         const allItems = [
+                            ...costumes.map(name => ({ type: 'Costume', name, isComplete: char.isChecked || (char.checkedCostumes||[]).includes(name) })),
+                            ...props.map(name => ({ type: 'Prop', name, isComplete: char.isChecked || (char.checkedProps||[]).includes(name) }))
+                         ];
+                         
+                         // Sort: Completed (true) to Top, Incomplete (false) to bottom
+                         allItems.sort((a, b) => (a.isComplete === b.isComplete) ? 0 : a.isComplete ? -1 : 1);
+
+                         const completedItems = allItems.filter(i => i.isComplete);
+                         const pendingItems = allItems.filter(i => !i.isComplete);
+
+                         return (
+                           <div key={char.id} className="border border-[#e2e8f0] rounded-xl overflow-hidden bg-[#f8fafc] break-inside-avoid">
+                             <div className={`px-4 py-3 border-b border-[#e2e8f0] flex justify-between items-center ${char.isChecked ? 'bg-[#f0fdf4]' : 'bg-[#f1f5f9]'}`}>
+                                <h3 className="font-bold text-lg text-[#1e293b] flex items-center gap-2">
+                                  <span className="bg-[#1e293b] text-[#ffffff] w-6 h-6 rounded flex items-center justify-center text-xs">{char.serial}</span>
+                                  {char.name}
+                                </h3>
+                                {char.isChecked && <span className="bg-[#16a34a] text-[#ffffff] text-xs px-2 py-1 rounded font-bold tracking-widest uppercase">पूरा (All Done)</span>}
+                             </div>
+                             
+                             <div className="p-4 grid grid-cols-1 sm:grid-cols-2 gap-6 bg-[#ffffff]">
+                                {/* Completed Items */}
+                                <div className="space-y-3">
+                                  <h4 className="text-sm font-bold text-[#15803d] flex items-center gap-1 uppercase tracking-wider border-b border-[#dcfce7] pb-1">
+                                    <CheckCircle2 className="w-4 h-4" /> तैयार (Completed)
+                                  </h4>
+                                  {completedItems.length > 0 ? (
+                                    <ul className="space-y-2">
+                                      {completedItems.map((item, idx) => (
+                                        <li key={idx} className="flex items-start gap-2 text-sm text-[#475569]">
+                                          <CheckSquare className="w-4 h-4 mt-0.5 text-[#22c55e] shrink-0" />
+                                          <span className="leading-tight"><span className="text-xs font-semibold bg-[#f1f5f9] text-[#94a3b8] px-1.5 py-0.5 rounded mr-1.5">{item.type}</span> {item.name}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  ) : (
+                                    <p className="text-sm text-[#94a3b8] italic">कुछ नहीं</p>
+                                  )}
+                                </div>
+
+                                {/* Pending Items */}
+                                <div className="space-y-3">
+                                  <h4 className="text-sm font-bold text-[#dc2626] flex items-center gap-1 uppercase tracking-wider border-b border-[#fee2e2] pb-1">
+                                    <Circle className="w-4 h-4" /> बाकी है (Pending)
+                                  </h4>
+                                  {pendingItems.length > 0 ? (
+                                    <ul className="space-y-2">
+                                      {pendingItems.map((item, idx) => (
+                                        <li key={idx} className="flex items-start gap-2 text-sm text-[#475569]">
+                                          <Square className="w-4 h-4 mt-0.5 text-[#cbd5e1] shrink-0" />
+                                          <span className="leading-tight"><span className="text-xs font-semibold bg-[#f1f5f9] text-[#94a3b8] px-1.5 py-0.5 rounded mr-1.5">{item.type}</span> {item.name}</span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  ) : (
+                                    <p className="text-sm text-[#94a3b8] italic">कुछ नहीं</p>
+                                  )}
+                                </div>
+                             </div>
+                           </div>
+                         );
+                      })}
+                    </div>
+                </div>
+             </div>
+
+          </div>
+        </div>
+      )}
     </div>
   );
 }
