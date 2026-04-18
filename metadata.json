@@ -1,0 +1,6 @@
+{
+  "name": "Character & Costume Tracker",
+  "description": "A check-list sheet to track characters, their costumes, and props based on the provided image, with editing and local database support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
